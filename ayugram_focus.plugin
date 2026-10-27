@@ -7,6 +7,7 @@ Phase 1: Minimalist Search-first UI & Chat List Suppression.
 import logging
 from typing import Any, List
 
+from android_utils import run_on_ui_thread
 from base_plugin import BasePlugin, MethodHook, MenuItemData, MenuItemType
 from hook_utils import find_class, get_private_field
 from ui.settings import Header, Switch, Text, Divider
@@ -19,7 +20,7 @@ __description__ = (
     "скрывает отвлекающую ленту чатов и оставляет только чистый поиск."
 )
 __author__ = "@AL1US"
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=10.0.0"
 __sdk_version__ = ">=1.4.0"
@@ -40,7 +41,6 @@ def show_toast(text: str):
             pass
 
     try:
-        from android_utils import run_on_ui_thread
         run_on_ui_thread(_run)
     except Exception:
         pass
@@ -114,10 +114,6 @@ class DialogsAdapterItemCountHook(MethodHook):
     """Перехватывает подсчёт элементов в адаптере чатов."""
 
     def __init__(self, plugin: "AyuGramFocusPlugin"):
-        try:
-            super().__init__()
-        except Exception:
-            pass
         self.plugin = plugin
 
     def before_hooked_method(self, param):
@@ -129,10 +125,6 @@ class DialogsActivityCreateViewHook(MethodHook):
     """Хук создания интерфейса DialogsActivity."""
 
     def __init__(self, plugin: "AyuGramFocusPlugin"):
-        try:
-            super().__init__()
-        except Exception:
-            pass
         self.plugin = plugin
 
     def after_hooked_method(self, param):
@@ -145,10 +137,6 @@ class DialogsActivityResumeHook(MethodHook):
     """Хук onResume для обновления состояния при возврате на экран."""
 
     def __init__(self, plugin: "AyuGramFocusPlugin"):
-        try:
-            super().__init__()
-        except Exception:
-            pass
         self.plugin = plugin
 
     def after_hooked_method(self, param):
@@ -166,10 +154,9 @@ class AyuGramFocusPlugin(BasePlugin):
         return self._safe_logger_instance
 
     def on_plugin_load(self):
-        self.logger.info("AyuGram Focus v0.1.3: старт инициализации...")
-        show_toast("Плагин v0.1.3 активирован!")
+        self.logger.info("AyuGram Focus v0.1.4: загрузка...")
 
-        # Добавляем пункт в боковое меню (Drawer), чтобы проверить работу
+        # Пункт в боковом меню (Drawer)
         try:
             self.add_menu_item(MenuItemData(
                 menu_type=MenuItemType.DRAWER_MENU,
@@ -178,25 +165,28 @@ class AyuGramFocusPlugin(BasePlugin):
                 icon="msg_search"
             ))
         except Exception as e:
-            self.logger.warning(f"Не удалось добавить пункт в боковое меню: {e}")
+            self.logger.warning(f"Не удалось добавить пункт меню: {e}")
 
         self._hook_dialogs_adapter()
         self._hook_dialogs_activity()
-        self.logger.info("AyuGram Focus: инициализация завершена!")
+        self.logger.info("AyuGram Focus v0.1.4: успешно запущен!")
 
     def on_plugin_unload(self):
-        self.logger.info("AyuGram Focus: плагин выгружен.")
-        show_toast("Плагин выгружен")
+        self.logger.info("AyuGram Focus: выгружен.")
 
     def handle_drawer_click(self, context: Any):
-        """Обработка клика по пункту в боковом меню."""
+        """Быстрое переключение фокуса из бокового меню."""
         new_val = not self.is_focus_enabled()
         try:
-            self.set_setting("focus_enabled", new_val, reload_settings=True)
+            self.set_setting("focus_enabled", new_val)
         except Exception:
             pass
         status = "ВКЛЮЧЁН" if new_val else "ВЫКЛЮЧЕН"
         show_toast(f"Режим Focus: {status}")
+
+        fragment = context.get("fragment")
+        if fragment:
+            self.apply_focus_state(fragment)
 
     def is_focus_enabled(self) -> bool:
         try:
@@ -216,11 +206,9 @@ class AyuGramFocusPlugin(BasePlugin):
         if method:
             try:
                 self.hook_method(method, DialogsAdapterItemCountHook(self))
-                self.logger.info("Хук DialogsAdapter.getItemCount() успешно установлен")
+                self.logger.info("Хук DialogsAdapter.getItemCount() установлен")
             except Exception as e:
-                self.logger.error(f"Ошибка при хуке DialogsAdapter.getItemCount(): {e}")
-        else:
-            self.logger.warning("Метод getItemCount() не найден в иерархии DialogsAdapter")
+                self.logger.error(f"Ошибка хука DialogsAdapter.getItemCount(): {e}")
 
     def _hook_dialogs_activity(self):
         DialogsActivityClass = find_class("org.telegram.ui.DialogsActivity")
@@ -235,80 +223,93 @@ class AyuGramFocusPlugin(BasePlugin):
             if create_method:
                 try:
                     self.hook_method(create_method, DialogsActivityCreateViewHook(self))
-                    self.logger.info("Хук DialogsActivity.createView() успешно установлен")
+                    self.logger.info("Хук DialogsActivity.createView() установлен")
                 except Exception as e:
-                    self.logger.error(f"Ошибка при хуке DialogsActivity.createView(): {e}")
+                    self.logger.error(f"Ошибка хука DialogsActivity.createView(): {e}")
 
         # 2. onResume
         resume_method = find_method_in_hierarchy(DialogsActivityClass, "onResume")
         if resume_method:
             try:
                 self.hook_method(resume_method, DialogsActivityResumeHook(self))
-                self.logger.info("Хук DialogsActivity.onResume() успешно установлен")
+                self.logger.info("Хук DialogsActivity.onResume() установлен")
             except Exception as e:
-                self.logger.error(f"Ошибка при хуке DialogsActivity.onResume(): {e}")
-        else:
-            self.logger.warning("Метод onResume() не найден в иерархии DialogsActivity")
+                self.logger.error(f"Ошибка хука DialogsActivity.onResume(): {e}")
 
     def apply_focus_state(self, dialogs_activity: Any, root_view: Any = None):
-        is_enabled = self.is_focus_enabled()
-        self.logger.info(f"apply_focus_state: is_enabled={is_enabled}")
-
-        if root_view is None:
+        """
+        Применяет фокус гарантированно на UI-потоке Android.
+        """
+        def _apply_on_ui():
             try:
-                root_view = dialogs_activity.getFragmentView()
-            except Exception:
-                root_view = get_private_field(dialogs_activity, "fragmentView")
+                is_enabled = self.is_focus_enabled()
+                self.logger.info(f"apply_focus_state на UI-потоке: is_enabled={is_enabled}")
 
-        if not root_view:
-            self.logger.warning("apply_focus_state: root_view не найден")
-            return
+                rv = root_view
+                if rv is None:
+                    try:
+                        rv = dialogs_activity.getFragmentView()
+                    except Exception:
+                        rv = get_private_field(dialogs_activity, "fragmentView")
 
-        # Скрытие listView
+                if not rv:
+                    self.logger.warning("root_view не найден в DialogsActivity")
+                    return
+
+                # 1. Скрываем одиночный listView (если папки выключены)
+                try:
+                    main_list = get_private_field(dialogs_activity, "listView")
+                    if main_list:
+                        main_list.setVisibility(8 if is_enabled else 0)
+                except Exception:
+                    pass
+
+                # 2. Скрываем списки внутри всех вкладок/папок (viewPages)
+                try:
+                    view_pages = get_private_field(dialogs_activity, "viewPages")
+                    if view_pages:
+                        for page in view_pages:
+                            if not page:
+                                continue
+                            for field in ("listView", "fragmentView"):
+                                try:
+                                    v = get_private_field(page, field)
+                                    if v:
+                                        v.setVisibility(8 if is_enabled else 0)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+                # 3. Вкладки папок
+                if self.get_setting("hide_folders", True):
+                    self.hide_folder_tabs(dialogs_activity, hide=is_enabled)
+                else:
+                    self.hide_folder_tabs(dialogs_activity, hide=False)
+
+                # 4. Кнопка создания чата (FAB)
+                try:
+                    fab = get_private_field(dialogs_activity, "floatingButton")
+                    if fab:
+                        fab.setVisibility(8 if is_enabled else 0)
+                except Exception:
+                    pass
+
+                # 5. Внедряем или обновляем видимость Focus UI
+                self.inject_focus_ui(dialogs_activity, rv, is_enabled)
+
+                # 6. Авто-поиск
+                if is_enabled and self.get_setting("auto_open_search", False):
+                    self.open_search(dialogs_activity)
+
+            except Exception as e:
+                self.logger.error(f"Ошибка в _apply_on_ui: {e}")
+
+        # ОБЯЗАТЕЛЬНО отправляем выполнение на главный поток Android UI!
         try:
-            main_list = get_private_field(dialogs_activity, "listView")
-            if main_list:
-                main_list.setVisibility(8 if is_enabled else 0)
-        except Exception:
-            pass
-
-        # Скрытие viewPages (папки/вкладки)
-        try:
-            view_pages = get_private_field(dialogs_activity, "viewPages")
-            if view_pages:
-                for page in view_pages:
-                    if not page:
-                        continue
-                    for field in ("listView", "fragmentView"):
-                        try:
-                            v = get_private_field(page, field)
-                            if v:
-                                v.setVisibility(8 if is_enabled else 0)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
-
-        # Папки
-        if self.get_setting("hide_folders", True):
-            self.hide_folder_tabs(dialogs_activity, hide=is_enabled)
-        else:
-            self.hide_folder_tabs(dialogs_activity, hide=False)
-
-        # Плавающая кнопка
-        try:
-            fab = get_private_field(dialogs_activity, "floatingButton")
-            if fab:
-                fab.setVisibility(8 if is_enabled else 0)
-        except Exception:
-            pass
-
-        # Оверлей
-        self.inject_focus_ui(dialogs_activity, root_view, is_enabled)
-
-        # Авто-поиск
-        if is_enabled and self.get_setting("auto_open_search", False):
-            self.open_search(dialogs_activity)
+            run_on_ui_thread(_apply_on_ui)
+        except Exception as e:
+            self.logger.error(f"Не удалось запустить задачу на UI потоке: {e}")
 
     def hide_folder_tabs(self, dialogs_activity: Any, hide: bool = True):
         tab_field_names = ("scrollSlidingTabStrip", "folderTabsView", "tabsView")
@@ -428,26 +429,23 @@ class AyuGramFocusPlugin(BasePlugin):
                 key="focus_enabled",
                 text="Включить Focus Mode",
                 default=True,
-                reload_settings=True,
                 subtext="Скрывает стандартную ленту всех чатов, каналов и групп",
             ),
             Switch(
                 key="auto_open_search",
                 text="Авто-поиск при входе",
                 default=False,
-                reload_settings=True,
                 subtext="Сразу открывать клавиатуру и поле поиска при открытии Telegram",
             ),
             Switch(
                 key="hide_folders",
                 text="Скрывать вкладки папок",
                 default=True,
-                reload_settings=True,
                 subtext="Скрывает горизонтальные папки сверху для минимализма",
             ),
             Divider(),
             Text(
                 text="О плагине",
-                subtext="AyuGram Focus v0.1.3\nРазработано специально для исключения информационного шума.",
+                subtext="AyuGram Focus v0.1.4\nРазработано специально для исключения информационного шума.",
             ),
         ]
