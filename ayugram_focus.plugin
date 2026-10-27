@@ -4,6 +4,7 @@ AyuGram Focus Plugin (Spotlight Focus)
 Phase 1: Minimalist Search-first UI & Chat List Suppression.
 """
 
+import logging
 from typing import Any, List
 
 from base_plugin import BasePlugin, MethodHook
@@ -18,12 +19,68 @@ __description__ = (
     "скрывает отвлекающую ленту чатов и оставляет только чистый поиск."
 )
 __author__ = "@AL1US"
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=10.0.0"
 __sdk_version__ = ">=1.4.0"
 
 OVERLAY_TAG = "ayugram_focus_overlay_view"
+
+
+class SafeLogger:
+    """
+    Обеспечивает обратную совместимость логирования:
+    работает как на новых версиях exteraGram/AyuGram (self.logger),
+    так и на более старых, где использовался self.log() или android_utils.log().
+    """
+
+    def __init__(self, plugin: Any):
+        self.plugin = plugin
+        self._sys_logger = logging.getLogger(__id__)
+
+    def _log(self, level: str, msg: str, *args):
+        formatted = msg % args if args else str(msg)
+        full_msg = f"[{level}] {formatted}"
+
+        # 1. Пробуем старый метод BasePlugin.log()
+        try:
+            if hasattr(self.plugin, "log") and callable(getattr(self.plugin, "log")):
+                self.plugin.log(full_msg)
+                return
+        except Exception:
+            pass
+
+        # 2. Пробуем android_utils.log()
+        try:
+            from android_utils import log as a_log
+
+            a_log(full_msg)
+            return
+        except Exception:
+            pass
+
+        # 3. Фолбэк на стандартный logging / stdout
+        try:
+            self._sys_logger.info(full_msg)
+        except Exception:
+            print(f"[{__id__}] {full_msg}")
+
+    def info(self, msg: str, *args):
+        self._log("INFO", msg, *args)
+
+    def error(self, msg: str, *args):
+        self._log("ERROR", msg, *args)
+
+    def warning(self, msg: str, *args):
+        self._log("WARN", msg, *args)
+
+    def debug(self, msg: str, *args):
+        self._log("DEBUG", msg, *args)
+
+    def exception(self, msg: str, *args):
+        import traceback
+
+        self._log("ERROR", f"{msg}\n{traceback.format_exc()}", *args)
 
 
 class DialogsAdapterItemCountHook(MethodHook):
@@ -34,7 +91,10 @@ class DialogsAdapterItemCountHook(MethodHook):
     """
 
     def __init__(self, plugin: "AyuGramFocusPlugin"):
-        super().__init__()
+        try:
+            super().__init__()
+        except Exception:
+            pass
         self.plugin = plugin
 
     def before_hooked_method(self, param):
@@ -49,7 +109,10 @@ class DialogsActivityCreateViewHook(MethodHook):
     """
 
     def __init__(self, plugin: "AyuGramFocusPlugin"):
-        super().__init__()
+        try:
+            super().__init__()
+        except Exception:
+            pass
         self.plugin = plugin
 
     def after_hooked_method(self, param):
@@ -76,7 +139,10 @@ class DialogsActivityResumeHook(MethodHook):
     """
 
     def __init__(self, plugin: "AyuGramFocusPlugin"):
-        super().__init__()
+        try:
+            super().__init__()
+        except Exception:
+            pass
         self.plugin = plugin
 
     def after_hooked_method(self, param):
@@ -93,6 +159,12 @@ class AyuGramFocusPlugin(BasePlugin):
     Основной класс плагина фокуса.
     """
 
+    @property
+    def logger(self) -> SafeLogger:
+        if not hasattr(self, "_safe_logger_instance"):
+            self._safe_logger_instance = SafeLogger(self)
+        return self._safe_logger_instance
+
     def on_plugin_load(self):
         self.logger.info("AyuGram Focus Plugin: инициализация...")
         self._hook_dialogs_adapter()
@@ -103,7 +175,12 @@ class AyuGramFocusPlugin(BasePlugin):
         self.logger.info("AyuGram Focus Plugin: выгружен.")
 
     def is_focus_enabled(self) -> bool:
-        return bool(self.get_setting("focus_enabled", True))
+        try:
+            if hasattr(self, "get_setting"):
+                return bool(self.get_setting("focus_enabled", True))
+        except Exception:
+            pass
+        return True
 
     def _hook_dialogs_adapter(self):
         """Хукаем DialogsAdapter.getItemCount(), чтобы скрыть стандартную ленту."""
@@ -140,7 +217,11 @@ class AyuGramFocusPlugin(BasePlugin):
 
         # Хук onResume()
         try:
-            on_resume_method = DialogsActivityClass.getMethod("onResume")
+            try:
+                on_resume_method = DialogsActivityClass.getDeclaredMethod("onResume")
+            except Exception:
+                on_resume_method = DialogsActivityClass.getMethod("onResume")
+
             self.hook_method(on_resume_method, DialogsActivityResumeHook(self))
             self.logger.info("Хук DialogsActivity.onResume() успешно установлен")
         except Exception as e:
@@ -284,6 +365,6 @@ class AyuGramFocusPlugin(BasePlugin):
             Divider(),
             Text(
                 text="О плагине",
-                subtext="AyuGram Focus v0.1.0\nРазработано специально для исключения информационного шума.",
+                subtext="AyuGram Focus v0.1.1\nРазработано специально для исключения информационного шума.",
             ),
         ]
