@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 AyuGram Focus Plugin (Spotlight Focus)
-Phase 1: Fullscreen Clean Overlay & Window-level Search Resolution.
+Phase 1: Fullscreen Clean Overlay & Native Telegram Search Integration.
+Version: 0.2.0
 """
 
 import logging
@@ -20,7 +21,7 @@ __description__ = (
     "скрывает отвлекающую ленту чатов и оставляет только чистый поиск."
 )
 __author__ = "@AL1US"
-__version__ = "0.1.8"
+__version__ = "0.2.0"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=10.0.0"
 __sdk_version__ = ">=1.4.0"
@@ -39,25 +40,6 @@ def show_toast(text: str):
                 Toast.makeText(ctx, f"[Focus] {text}", Toast.LENGTH_SHORT).show()
         except Exception:
             pass
-
-    try:
-        run_on_ui_thread(_run)
-    except Exception:
-        pass
-
-
-def show_debug_dialog(context: Any, title: str, message: str):
-    """Показывает стандартный диалог Android для отладки."""
-    def _run():
-        try:
-            from android.app import AlertDialog
-            builder = AlertDialog.Builder(context)
-            builder.setTitle(title)
-            builder.setMessage(message)
-            builder.setPositiveButton("OK", None)
-            builder.show()
-        except Exception:
-            show_toast(message[:100])
 
     try:
         run_on_ui_thread(_run)
@@ -125,7 +107,9 @@ class SafeLogger:
         self._log("DEBUG", msg, *args)
 
 
-class DialogsVisibleHook(MethodHook):
+class DialogsLifecycleHook(MethodHook):
+    """Срабатывает при возврате или отображении экрана чатов."""
+
     def __init__(self, plugin: "AyuGramFocusPlugin"):
         self.plugin = plugin
 
@@ -134,7 +118,30 @@ class DialogsVisibleHook(MethodHook):
             self.plugin.apply_fullscreen_overlay(param.thisObject, True)
 
 
-class DialogsResumeHook(MethodHook):
+class DialogsShowSearchHook(MethodHook):
+    """Скрывает оверлей при открытии поиска и восстанавливает при закрытии."""
+
+    def __init__(self, plugin: "AyuGramFocusPlugin"):
+        self.plugin = plugin
+
+    def after_hooked_method(self, param):
+        try:
+            args = param.getArgs()
+            if args and len(args) > 0:
+                is_show = bool(args[0])
+                if is_show:
+                    # Поиск открыт — скрываем оверлей, открывая результаты
+                    self.plugin.apply_fullscreen_overlay(param.thisObject, False)
+                elif self.plugin.is_focus_enabled():
+                    # Поиск закрыт — возвращаем оверлей
+                    self.plugin.apply_fullscreen_overlay(param.thisObject, True)
+        except Exception:
+            pass
+
+
+class DialogsCloseSearchHook(MethodHook):
+    """Возвращает оверлей при закрытии поиска через closeSearch()."""
+
     def __init__(self, plugin: "AyuGramFocusPlugin"):
         self.plugin = plugin
 
@@ -143,45 +150,24 @@ class DialogsResumeHook(MethodHook):
             self.plugin.apply_fullscreen_overlay(param.thisObject, True)
 
 
-class DialogsCreateViewHook(MethodHook):
-    def __init__(self, plugin: "AyuGramFocusPlugin"):
+class MenuItemSearchHook(MethodHook):
+    """Отслеживает изменение поиска в ActionBarMenuItem (для совместимости)."""
+
+    def __init__(self, plugin: "AyuGramFocusPlugin", is_open_hook: bool):
         self.plugin = plugin
-
-    def after_hooked_method(self, param):
-        if self.plugin.is_focus_enabled():
-            root_view = param.getResult()
-            self.plugin.apply_fullscreen_overlay(param.thisObject, True, root_view)
-
-
-class MenuItemOpenSearchHook(MethodHook):
-    """Скрывает оверлей, когда поиск открыт."""
-    def __init__(self, plugin: "AyuGramFocusPlugin"):
-        self.plugin = plugin
+        self.is_open_hook = is_open_hook
 
     def after_hooked_method(self, param):
         try:
             from client_utils import get_last_fragment
             frag = get_last_fragment()
             if frag:
-                self.plugin.apply_fullscreen_overlay(frag, False)
+                if self.is_open_hook:
+                    self.plugin.apply_fullscreen_overlay(frag, False)
+                elif self.plugin.is_focus_enabled():
+                    self.plugin.apply_fullscreen_overlay(frag, True)
         except Exception:
             pass
-
-
-class MenuItemCloseSearchHook(MethodHook):
-    """Возвращает оверлей, когда поиск закрыт."""
-    def __init__(self, plugin: "AyuGramFocusPlugin"):
-        self.plugin = plugin
-
-    def after_hooked_method(self, param):
-        if self.plugin.is_focus_enabled():
-            try:
-                from client_utils import get_last_fragment
-                frag = get_last_fragment()
-                if frag:
-                    self.plugin.apply_fullscreen_overlay(frag, True)
-            except Exception:
-                pass
 
 
 class AyuGramFocusPlugin(BasePlugin):
@@ -194,7 +180,7 @@ class AyuGramFocusPlugin(BasePlugin):
         return self._safe_logger_instance
 
     def on_plugin_load(self):
-        self.logger.info("AyuGram Focus v0.1.8 загружен")
+        self.logger.info(f"AyuGram Focus v{__version__} загружен")
 
         # Добавляем пункт в боковое меню
         try:
@@ -248,40 +234,53 @@ class AyuGramFocusPlugin(BasePlugin):
         run_on_ui_thread(_action)
 
     def _hook_dialogs_activity(self):
+        """Хукает жизненный цикл и поиск в DialogsActivity."""
         DialogsActivityClass = find_class("org.telegram.ui.DialogsActivity")
         if not DialogsActivityClass:
             return
 
-        m_vis = find_method_in_hierarchy(DialogsActivityClass, "onBecomeFullyVisible")
-        if m_vis:
-            try:
-                self.hook_method(m_vis, DialogsVisibleHook(self))
-            except Exception:
-                pass
-
-        m_res = find_method_in_hierarchy(DialogsActivityClass, "onResume")
-        if m_res:
-            try:
-                self.hook_method(m_res, DialogsResumeHook(self))
-            except Exception:
-                pass
-
-        ContextClass = find_class("android.content.Context")
-        if ContextClass:
-            m_cv = find_method_in_hierarchy(DialogsActivityClass, "createView", ContextClass)
-            if m_cv:
+        lifecycle_hook = DialogsLifecycleHook(self)
+        for m_name in ("onBecomeFullyVisible", "onResume"):
+            m = find_method_in_hierarchy(DialogsActivityClass, m_name)
+            if m:
                 try:
-                    self.hook_method(m_cv, DialogsCreateViewHook(self))
+                    self.hook_method(m, lifecycle_hook)
                 except Exception:
                     pass
 
+        show_hook = DialogsShowSearchHook(self)
+        close_hook = DialogsCloseSearchHook(self)
+
+        curr = DialogsActivityClass
+        while curr:
+            try:
+                for m in curr.getDeclaredMethods():
+                    name = m.getName()
+                    if name == "showSearch":
+                        try:
+                            self.hook_method(m, show_hook)
+                        except Exception:
+                            pass
+                    elif name == "closeSearch":
+                        try:
+                            self.hook_method(m, close_hook)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            try:
+                curr = curr.getSuperclass()
+            except Exception:
+                break
+
     def _hook_action_bar_menu_item(self):
+        """Хукает методы ActionBarMenuItem для совместимости с классическим интерфейсом."""
         ActionBarMenuItemClass = find_class("org.telegram.ui.ActionBar.ActionBarMenuItem")
         if not ActionBarMenuItemClass:
             return
 
-        open_hook = MenuItemOpenSearchHook(self)
-        close_hook = MenuItemCloseSearchHook(self)
+        open_hook = MenuItemSearchHook(self, True)
+        close_hook = MenuItemSearchHook(self, False)
 
         try:
             for m in ActionBarMenuItemClass.getDeclaredMethods():
@@ -296,121 +295,130 @@ class AyuGramFocusPlugin(BasePlugin):
                         self.hook_method(m, close_hook)
                     except Exception:
                         pass
-        except Exception as e:
-            self.logger.warning(f"Ошибка хука ActionBarMenuItem: {e}")
+        except Exception:
+            pass
 
-    def find_all_search_candidates(self, root_view: Any) -> List[Any]:
+    def _bring_search_and_actionbar_to_front(self, fragment: Any):
         """
-        Сканирует всё окно Android (DecorView) и находит любые элементы поиска.
+        Гарантирует, что верхняя шапка (меню) и нативная строка поиска остаются
+        поверх оверлея и доступны пользователю.
         """
-        candidates = []
         try:
-            decor = root_view.getRootView()
-            if not decor:
-                return candidates
+            ab = getattr(fragment, "actionBar", None) or get_private_field(fragment, "actionBar")
+            if ab and hasattr(ab, "bringToFront"):
+                ab.bringToFront()
+        except Exception:
+            pass
 
-            def _traverse(v):
-                if not v:
-                    return
-                try:
-                    cname = v.getClass().getName()
-                    if "ActionBarMenuItem" in cname or "SearchView" in cname:
-                        candidates.append(v)
-                        return
-                except Exception:
-                    pass
+        try:
+            fsf = getattr(fragment, "fragmentSearchField", None) or get_private_field(fragment, "fragmentSearchField")
+            if fsf and hasattr(fsf, "bringToFront"):
+                fsf.bringToFront()
+        except Exception:
+            pass
 
-                try:
-                    desc = str(v.getContentDescription() or "").lower()
-                    if "search" in desc or "поиск" in desc:
-                        candidates.append(v)
-                        return
-                except Exception:
-                    pass
-
-                if hasattr(v, "getChildCount"):
-                    for i in range(v.getChildCount()):
-                        _traverse(v.getChildAt(i))
-
-            _traverse(decor)
-        except Exception as e:
-            self.logger.warning(f"Ошибка сканирования окна: {e}")
-
-        return candidates
-
-    def trigger_search(self, fragment: Any, overlay: Any, root_view: Any):
+    def trigger_search(self, fragment: Any, overlay: Any):
         """
-        Ищет кнопку поиска по всему окну и программно активирует её.
+        Нативно активирует поиск Telegram.
+        Работает со всеми версиями Telegram: Telegram 10+ (fragmentSearchField)
+        и классическими (searchItem / ActionBar).
         """
-        candidates = self.find_all_search_candidates(root_view)
+        try:
+            from org.telegram.messenger import AndroidUtilities
+        except Exception:
+            AndroidUtilities = None
 
         opened = False
-        debug_log = []
 
-        for item in candidates:
-            cname = item.getClass().getSimpleName()
-            debug_log.append(f"Found: {cname}")
+        # 1. Вызов нативного метода showSearch(boolean show, ...) у самого DialogsActivity
+        try:
+            curr = fragment.getClass()
+            while curr and not opened:
+                for m in curr.getDeclaredMethods():
+                    if m.getName() == "showSearch":
+                        m.setAccessible(True)
+                        count = m.getParameterCount()
+                        if count == 3:
+                            m.invoke(fragment, True, False, True)
+                            opened = True
+                            break
+                        elif count == 4:
+                            m.invoke(fragment, True, False, True, False)
+                            opened = True
+                            break
+                curr = curr.getSuperclass()
+        except Exception as e:
+            self.logger.warning(f"showSearch invoke failed: {e}")
 
-            # 1. openSearch(True)
-            try:
-                if hasattr(item, "openSearch"):
-                    item.openSearch(True)
-                    opened = True
-                    break
-            except Exception:
-                pass
-
-            # 2. toggleSearch(True)
-            try:
-                if hasattr(item, "toggleSearch"):
-                    item.toggleSearch(True)
-                    opened = True
-                    break
-            except Exception:
-                pass
-
-            # 3. performClick()
-            try:
-                if item.performClick():
-                    opened = True
-                    break
-            except Exception:
-                pass
-
-            # 4. callOnClick()
-            try:
-                item.callOnClick()
+        # 2. Активация через fragmentSearchFieldWatcher и fragmentSearchField
+        try:
+            watcher = getattr(fragment, "fragmentSearchFieldWatcher", None) or get_private_field(fragment, "fragmentSearchFieldWatcher")
+            if watcher and hasattr(watcher, "toggleSearch"):
+                watcher.toggleSearch(True)
                 opened = True
-                break
-            except Exception:
-                pass
+        except Exception as e:
+            self.logger.warning(f"toggleSearch failed: {e}")
+
+        try:
+            fsf = getattr(fragment, "fragmentSearchField", None) or get_private_field(fragment, "fragmentSearchField")
+            if fsf:
+                edit_text = getattr(fsf, "editText", None) or get_private_field(fsf, "editText")
+                if edit_text:
+                    edit_text.requestFocus()
+                    if AndroidUtilities:
+                        AndroidUtilities.showKeyboard(edit_text)
+                    opened = True
+                elif hasattr(fsf, "performClick"):
+                    fsf.performClick()
+                    opened = True
+        except Exception as e:
+            self.logger.warning(f"fragmentSearchField focus failed: {e}")
+
+        # 3. Клик по searchItem у самого фрагмента
+        if not opened:
+            try:
+                si = getattr(fragment, "searchItem", None) or get_private_field(fragment, "searchItem")
+                if si:
+                    if hasattr(si, "performClick") and si.performClick():
+                        opened = True
+                    elif hasattr(si, "callOnClick"):
+                        si.callOnClick()
+                        opened = True
+            except Exception as e:
+                self.logger.warning(f"searchItem click failed: {e}")
+
+        # 4. Сканирование меню ActionBar (для более старых версий)
+        if not opened:
+            try:
+                ab = getattr(fragment, "actionBar", None) or get_private_field(fragment, "actionBar")
+                if ab:
+                    menu = getattr(ab, "menu", None) or get_private_field(ab, "menu")
+                    if menu and hasattr(menu, "getChildCount"):
+                        for i in range(menu.getChildCount()):
+                            child = menu.getChildAt(i)
+                            if child:
+                                try:
+                                    if hasattr(child, "openSearch"):
+                                        child.openSearch(True)
+                                        opened = True
+                                        break
+                                    elif hasattr(child, "performClick") and child.performClick():
+                                        opened = True
+                                        break
+                                except Exception:
+                                    pass
+            except Exception as e:
+                self.logger.warning(f"actionBar menu click failed: {e}")
 
         if opened:
-            # Скрываем оверлей только после успешного старта
             if overlay:
-                overlay.setVisibility(8)
-            # Показываем клавиатуру
-            try:
-                from org.telegram.messenger import AndroidUtilities
-                for it in candidates:
-                    if hasattr(it, "getSearchField"):
-                        f = it.getSearchField()
-                        if f:
-                            AndroidUtilities.showKeyboard(f)
-                            break
-            except Exception:
-                pass
+                from android.view import View
+                overlay.setVisibility(View.GONE)
         else:
-            # Если не нашли — показываем информативный диалог
-            ctx = root_view.getContext()
-            msg = (
-                f"Найдено элементов поиска: {len(candidates)}\n"
-                f"{chr(10).join(debug_log)}\n\n"
-                "Вы можете просто нажать значок лупы 🔍 в правом верхнем углу Telegram."
-            )
-            show_debug_dialog(ctx, "Поиск не запущен", msg)
+            show_toast("Нажмите строку поиска в верхней части экрана")
 
     def apply_fullscreen_overlay(self, fragment: Any, is_enabled: bool, root_view: Any = None):
+        """Отображает или скрывает защитный экран фокуса поверх ленты чатов."""
         def _ui_task():
             try:
                 rv = root_view
@@ -426,6 +434,7 @@ class AyuGramFocusPlugin(BasePlugin):
                 from android.view import Gravity, View
                 from android.widget import FrameLayout, LinearLayout, TextView
                 from android.graphics import Color
+                from android.graphics.drawable import GradientDrawable
 
                 overlay = rv.findViewWithTag(OVERLAY_TAG)
 
@@ -434,24 +443,44 @@ class AyuGramFocusPlugin(BasePlugin):
                         overlay.setVisibility(View.GONE)
                     return
 
+                # Проверяем, не открыт ли сейчас поиск в Telegram
+                is_searching = False
+                try:
+                    s1 = getattr(fragment, "searching", None) or get_private_field(fragment, "searching")
+                    s2 = getattr(fragment, "searchIsShowed", None) or get_private_field(fragment, "searchIsShowed")
+                    is_searching = bool(s1 or s2)
+                except Exception:
+                    pass
+
+                if is_searching:
+                    if overlay:
+                        overlay.setVisibility(View.GONE)
+                    return
+
                 if overlay:
                     overlay.setVisibility(View.VISIBLE)
                     overlay.bringToFront()
+                    self._bring_search_and_actionbar_to_front(fragment)
                     return
 
                 context = rv.getContext()
                 overlay = FrameLayout(context)
                 overlay.setTag(OVERLAY_TAG)
                 overlay.setClickable(True)
+                overlay.setFocusable(True)
 
+                # Тематические цвета
                 bg_color = Color.parseColor("#0F172A")
                 title_color = Color.WHITE
                 sub_color = Color.parseColor("#94A3B8")
+                btn_color = Color.parseColor("#3B82F6")
+
                 try:
                     from org.telegram.ui.ActionBar import Theme
                     bg_color = Theme.getColor(Theme.key_windowBackgroundWhite)
                     title_color = Theme.getColor(Theme.key_windowBackgroundWhiteBlackText)
                     sub_color = Theme.getColor(Theme.key_windowBackgroundWhiteGrayText)
+                    btn_color = Theme.getColor(Theme.key_featuredStickers_addButton) or btn_color
                 except Exception:
                     pass
 
@@ -467,10 +496,11 @@ class AyuGramFocusPlugin(BasePlugin):
                 title.setTextSize(26)
                 title.setGravity(Gravity.CENTER)
                 title.setTextColor(title_color)
+                title.setTypeface(title.getTypeface(), 1)
                 center.addView(title)
 
                 sub = TextView(context)
-                sub.setText("Все чаты и каналы скрыты.\nНажмите кнопку ниже, чтобы открыть поиск.")
+                sub.setText("Все чаты и каналы скрыты.\nВведите запрос в поиск выше или нажмите кнопку.")
                 sub.setTextSize(14)
                 sub.setGravity(Gravity.CENTER)
                 sub.setPadding(0, 20, 0, 40)
@@ -482,11 +512,17 @@ class AyuGramFocusPlugin(BasePlugin):
                 btn.setTextSize(16)
                 btn.setGravity(Gravity.CENTER)
                 btn.setPadding(48, 28, 48, 28)
-                btn.setBackgroundColor(Color.parseColor("#3B82F6"))
                 btn.setTextColor(Color.WHITE)
+                btn.setTypeface(btn.getTypeface(), 1)
+
+                btn_bg = GradientDrawable()
+                btn_bg.setShape(GradientDrawable.RECTANGLE)
+                btn_bg.setCornerRadius(24.0)
+                btn_bg.setColor(btn_color)
+                btn.setBackground(btn_bg)
 
                 def _on_btn_click(v):
-                    self.trigger_search(fragment, overlay, rv)
+                    self.trigger_search(fragment, overlay)
 
                 btn.setOnClickListener(OnClickListener(_on_btn_click))
                 center.addView(btn)
@@ -497,6 +533,8 @@ class AyuGramFocusPlugin(BasePlugin):
                 full_params = FrameLayout.LayoutParams(-1, -1)
                 rv.addView(overlay, full_params)
                 overlay.bringToFront()
+
+                self._bring_search_and_actionbar_to_front(fragment)
 
             except Exception as e:
                 show_toast(f"Ошибка интерфейса: {e}")
@@ -515,6 +553,6 @@ class AyuGramFocusPlugin(BasePlugin):
             Divider(),
             Text(
                 text="О плагине",
-                subtext="AyuGram Focus v0.1.8\nПерекрывает шумный экран и оставляет только поиск.",
+                subtext=f"AyuGram Focus v{__version__}\nСкрывает шум и открывает прямой поиск.",
             ),
         ]
