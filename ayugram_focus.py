@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 AyuGram Focus Plugin (Spotlight Focus)
-Phase 1: Fullscreen Clean Overlay & Search.
+Phase 1: Fullscreen Clean Overlay & Synchronized Search.
 """
 
 import logging
@@ -20,7 +20,7 @@ __description__ = (
     "скрывает отвлекающую ленту чатов и оставляет только чистый поиск."
 )
 __author__ = "@AL1US"
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=10.0.0"
 __sdk_version__ = ">=1.4.0"
@@ -140,6 +140,39 @@ class DialogsCreateViewHook(MethodHook):
             self.plugin.apply_fullscreen_overlay(param.thisObject, True, root_view)
 
 
+class MenuItemOpenSearchHook(MethodHook):
+    """Когда поиск открывается — временно скрываем оверлей, чтобы видеть результаты."""
+
+    def __init__(self, plugin: "AyuGramFocusPlugin"):
+        self.plugin = plugin
+
+    def after_hooked_method(self, param):
+        try:
+            from client_utils import get_last_fragment
+            frag = get_last_fragment()
+            if frag:
+                self.plugin.apply_fullscreen_overlay(frag, False)
+        except Exception:
+            pass
+
+
+class MenuItemCloseSearchHook(MethodHook):
+    """Когда поиск закрывается — возвращаем оверлей, чтобы скрыть чаты."""
+
+    def __init__(self, plugin: "AyuGramFocusPlugin"):
+        self.plugin = plugin
+
+    def after_hooked_method(self, param):
+        if self.plugin.is_focus_enabled():
+            try:
+                from client_utils import get_last_fragment
+                frag = get_last_fragment()
+                if frag:
+                    self.plugin.apply_fullscreen_overlay(frag, True)
+            except Exception:
+                pass
+
+
 class AyuGramFocusPlugin(BasePlugin):
     """Основной класс плагина фокуса."""
 
@@ -150,7 +183,7 @@ class AyuGramFocusPlugin(BasePlugin):
         return self._safe_logger_instance
 
     def on_plugin_load(self):
-        self.logger.info("AyuGram Focus v0.1.5 загружен")
+        self.logger.info("AyuGram Focus v0.1.6 загружен")
 
         # Добавляем пункт в боковое меню
         try:
@@ -164,6 +197,7 @@ class AyuGramFocusPlugin(BasePlugin):
             self.logger.warning(f"Ошибка добавления пункта меню: {e}")
 
         self._hook_dialogs_activity()
+        self._hook_action_bar_menu_item()
 
     def on_plugin_unload(self):
         self.logger.info("AyuGram Focus выгружен")
@@ -177,7 +211,7 @@ class AyuGramFocusPlugin(BasePlugin):
         return True
 
     def handle_drawer_click(self, context: Any):
-        """Клик по пункту в боковом меню: мгновенно переключает режим и экран."""
+        """Клик по пункту в боковом меню."""
         def _action():
             try:
                 frag = context.get("fragment")
@@ -189,7 +223,7 @@ class AyuGramFocusPlugin(BasePlugin):
                         pass
 
                 if not frag:
-                    show_toast("Ошибка: не удалось определить экран диалогов")
+                    show_toast("Не удалось определить экран чатов")
                     return
 
                 new_state = not self.is_focus_enabled()
@@ -198,7 +232,7 @@ class AyuGramFocusPlugin(BasePlugin):
                 status = "ВКЛЮЧЁН" if new_state else "ВЫКЛЮЧЕН"
                 show_toast(f"Режим Focus: {status}")
             except Exception as e:
-                show_toast(f"Ошибка клика: {e}")
+                show_toast(f"Ошибка: {e}")
 
         run_on_ui_thread(_action)
 
@@ -207,7 +241,6 @@ class AyuGramFocusPlugin(BasePlugin):
         if not DialogsActivityClass:
             return
 
-        # 1. onBecomeFullyVisible
         m_vis = find_method_in_hierarchy(DialogsActivityClass, "onBecomeFullyVisible")
         if m_vis:
             try:
@@ -215,7 +248,6 @@ class AyuGramFocusPlugin(BasePlugin):
             except Exception:
                 pass
 
-        # 2. onResume
         m_res = find_method_in_hierarchy(DialogsActivityClass, "onResume")
         if m_res:
             try:
@@ -223,7 +255,6 @@ class AyuGramFocusPlugin(BasePlugin):
             except Exception:
                 pass
 
-        # 3. createView
         ContextClass = find_class("android.content.Context")
         if ContextClass:
             m_cv = find_method_in_hierarchy(DialogsActivityClass, "createView", ContextClass)
@@ -232,6 +263,105 @@ class AyuGramFocusPlugin(BasePlugin):
                     self.hook_method(m_cv, DialogsCreateViewHook(self))
                 except Exception:
                     pass
+
+    def _hook_action_bar_menu_item(self):
+        """Хукаем открытие и закрытие поиска на ActionBarMenuItem."""
+        ActionBarMenuItemClass = find_class("org.telegram.ui.ActionBar.ActionBarMenuItem")
+        if not ActionBarMenuItemClass:
+            return
+
+        open_hook = MenuItemOpenSearchHook(self)
+        close_hook = MenuItemCloseSearchHook(self)
+
+        try:
+            for m in ActionBarMenuItemClass.getDeclaredMethods():
+                name = m.getName()
+                if name in ("openSearch", "toggleSearch"):
+                    try:
+                        self.hook_method(m, open_hook)
+                    except Exception:
+                        pass
+                elif name == "closeSearch":
+                    try:
+                        self.hook_method(m, close_hook)
+                    except Exception:
+                        pass
+        except Exception as e:
+            self.logger.warning(f"Ошибка хука ActionBarMenuItem: {e}")
+
+    def find_search_item(self, fragment: Any) -> Any:
+        """Находит элемент поиска в фрагменте или ActionBar."""
+        for field_name in ("searchItem", "search_item", "searchFieldItem", "searchMenuItem"):
+            item = get_private_field(fragment, field_name)
+            if item:
+                return item
+
+        try:
+            action_bar = getattr(fragment, "getActionBar", lambda: None)()
+            if not action_bar:
+                action_bar = get_private_field(fragment, "actionBar")
+
+            if action_bar:
+                def _scan_views(v):
+                    if not v:
+                        return None
+                    try:
+                        cname = v.getClass().getName()
+                        if "ActionBarMenuItem" in cname:
+                            return v
+                    except Exception:
+                        pass
+                    if hasattr(v, "getChildCount"):
+                        for i in range(v.getChildCount()):
+                            found = _scan_views(v.getChildAt(i))
+                            if found:
+                                return found
+                    return None
+
+                found_item = _scan_views(action_bar)
+                if found_item:
+                    return found_item
+        except Exception:
+            pass
+        return None
+
+    def trigger_search(self, fragment: Any, overlay: Any = None):
+        """Запускает нативный поиск и временно прячет оверлей."""
+        if overlay:
+            overlay.setVisibility(8)  # View.GONE
+
+        item = self.find_search_item(fragment)
+        if not item:
+            show_toast("Поиск не найден в шапке")
+            return
+
+        opened = False
+        for method_name in ("openSearch", "toggleSearch"):
+            try:
+                m = getattr(item, method_name, None)
+                if m:
+                    m(True)
+                    opened = True
+                    break
+            except Exception:
+                pass
+
+        if not opened:
+            try:
+                item.performClick()
+                opened = True
+            except Exception:
+                pass
+
+        if not opened:
+            try:
+                item.callOnClick()
+                opened = True
+            except Exception:
+                pass
+
+        if not opened:
+            show_toast("Не удалось активировать строку поиска")
 
     def apply_fullscreen_overlay(self, fragment: Any, is_enabled: bool, root_view: Any = None):
         """
@@ -260,19 +390,18 @@ class AyuGramFocusPlugin(BasePlugin):
                         overlay.setVisibility(View.GONE)
                     return
 
-                # Если оверлей уже создан — просто поднимаем его наверх
+                # Если оверлей уже создан — показываем и поднимаем на передний план
                 if overlay:
                     overlay.setVisibility(View.VISIBLE)
                     overlay.bringToFront()
                     return
 
-                # Создаем полноэкранный непрозрачный щит
+                # Создаем полноэкранный щит
                 context = rv.getContext()
                 overlay = FrameLayout(context)
                 overlay.setTag(OVERLAY_TAG)
                 overlay.setClickable(True)
 
-                # Цвет фона (темный или светлый по теме)
                 bg_color = Color.parseColor("#0F172A")
                 title_color = Color.WHITE
                 sub_color = Color.parseColor("#94A3B8")
@@ -286,7 +415,7 @@ class AyuGramFocusPlugin(BasePlugin):
 
                 overlay.setBackgroundColor(bg_color)
 
-                # Центральный блок с поиском
+                # Центральный блок
                 center = LinearLayout(context)
                 center.setOrientation(LinearLayout.VERTICAL)
                 center.setGravity(Gravity.CENTER)
@@ -302,7 +431,7 @@ class AyuGramFocusPlugin(BasePlugin):
 
                 # Подзаголовок
                 sub = TextView(context)
-                sub.setText("Все чаты и каналы скрыты.\nИспользуйте поиск, чтобы открыть нужный диалог.")
+                sub.setText("Все чаты и каналы скрыты.\nНажмите ниже, чтобы найти нужный диалог.")
                 sub.setTextSize(14)
                 sub.setGravity(Gravity.CENTER)
                 sub.setPadding(0, 20, 0, 40)
@@ -314,25 +443,21 @@ class AyuGramFocusPlugin(BasePlugin):
                 btn.setText("🔍  Найти чат или бота")
                 btn.setTextSize(16)
                 btn.setGravity(Gravity.CENTER)
-                btn.setPadding(40, 24, 40, 24)
+                btn.setPadding(48, 28, 48, 28)
                 btn.setBackgroundColor(Color.parseColor("#3B82F6"))
                 btn.setTextColor(Color.WHITE)
 
-                def _open_search(v):
-                    try:
-                        search_item = get_private_field(fragment, "searchItem")
-                        if search_item:
-                            search_item.openSearch(True)
-                    except Exception as err:
-                        show_toast(f"Поиск: {err}")
+                def _on_btn_click(v):
+                    self.trigger_search(fragment, overlay)
 
-                btn.setOnClickListener(OnClickListener(_open_search))
+                btn.setOnClickListener(OnClickListener(_on_btn_click))
                 center.addView(btn)
 
-                # Добавляем в оверлей и поверх fragmentView
+                # Размещаем по центру
                 c_params = FrameLayout.LayoutParams(-1, -2, Gravity.CENTER)
                 overlay.addView(center, c_params)
 
+                # Добавляем оверлей в root_view
                 full_params = FrameLayout.LayoutParams(-1, -1)
                 rv.addView(overlay, full_params)
                 overlay.bringToFront()
@@ -354,6 +479,6 @@ class AyuGramFocusPlugin(BasePlugin):
             Divider(),
             Text(
                 text="О плагине",
-                subtext="AyuGram Focus v0.1.5\nПерекрывает шумный экран и оставляет только поиск.",
+                subtext="AyuGram Focus v0.1.6\nПерекрывает шумный экран и оставляет только поиск.",
             ),
         ]
